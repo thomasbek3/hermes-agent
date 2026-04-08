@@ -76,6 +76,7 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import build_memory_context_block
+from agent.retry_utils import jittered_backoff
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
@@ -86,6 +87,7 @@ from agent.model_metadata import (
     estimate_tokens_rough, estimate_messages_tokens_rough, estimate_request_tokens_rough,
     get_next_probe_tier, parse_context_limit_from_error,
     save_context_length, is_local_endpoint,
+    query_ollama_num_ctx,
 )
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
@@ -1160,6 +1162,33 @@ class AIAgent:
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
         
+        # ── Ollama num_ctx injection ──
+        # Ollama defaults to 2048 context regardless of the model's capabilities.
+        # When running against an Ollama server, detect the model's max context
+        # and pass num_ctx on every chat request so the full window is used.
+        # User override: set model.ollama_num_ctx in config.yaml to cap VRAM use.
+        self._ollama_num_ctx: int | None = None
+        _ollama_num_ctx_override = None
+        if isinstance(_model_cfg, dict):
+            _ollama_num_ctx_override = _model_cfg.get("ollama_num_ctx")
+        if _ollama_num_ctx_override is not None:
+            try:
+                self._ollama_num_ctx = int(_ollama_num_ctx_override)
+            except (TypeError, ValueError):
+                logger.debug("Invalid ollama_num_ctx config value: %r", _ollama_num_ctx_override)
+        if self._ollama_num_ctx is None and self.base_url and is_local_endpoint(self.base_url):
+            try:
+                _detected = query_ollama_num_ctx(self.model, self.base_url)
+                if _detected and _detected > 0:
+                    self._ollama_num_ctx = _detected
+            except Exception as exc:
+                logger.debug("Ollama num_ctx detection failed: %s", exc)
+        if self._ollama_num_ctx and not self.quiet_mode:
+            logger.info(
+                "Ollama num_ctx: will request %d tokens (model max from /api/show)",
+                self._ollama_num_ctx,
+            )
+
         if not self.quiet_mode:
             if compression_enabled:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
@@ -5400,6 +5429,15 @@ class AIAgent:
         if _is_nous:
             extra_body["tags"] = ["product=hermes-agent"]
 
+        # Ollama num_ctx: override the 2048 default so the model actually
+        # uses the context window it was trained for.  Passed via the OpenAI
+        # SDK's extra_body → options.num_ctx, which Ollama's OpenAI-compat
+        # endpoint forwards to the runner as --ctx-size.
+        if self._ollama_num_ctx:
+            options = extra_body.get("options", {})
+            options["num_ctx"] = self._ollama_num_ctx
+            extra_body["options"] = options
+
         if extra_body:
             api_kwargs["extra_body"] = extra_body
 
@@ -7250,6 +7288,7 @@ class AIAgent:
             codex_auth_retry_attempted=False
             anthropic_auth_retry_attempted=False
             nous_auth_retry_attempted=False
+            thinking_sig_retry_attempted = False
             has_retried_429 = False
             restart_with_compressed_messages = False
             restart_with_length_continuation = False
@@ -7465,7 +7504,8 @@ class AIAgent:
                             }
                         
                         # Longer backoff for rate limiting (likely cause of None choices)
-                        wait_time = min(5 * (2 ** (retry_count - 1)), 120)  # 5s, 10s, 20s, 40s, 80s, 120s
+                        # Jittered exponential: 5s base, 120s cap + random jitter
+                        wait_time = jittered_backoff(retry_count, base_delay=5.0, max_delay=120.0)
                         self._vprint(f"{self.log_prefix}⏳ Retrying in {wait_time}s (extended backoff for possible rate limit)...", force=True)
                         logging.warning(f"Invalid API response (retry {retry_count}/{max_retries}): {', '.join(error_details)} | Provider: {provider_name}")
                         
@@ -7838,8 +7878,38 @@ class AIAgent:
                         print(f"{self.log_prefix}     • Check ANTHROPIC_API_KEY in {_dhh}/.env for API keys or legacy token values")
                         print(f"{self.log_prefix}     • For API keys: verify at https://console.anthropic.com/settings/keys")
                         print(f"{self.log_prefix}     • For Claude Code: run 'claude /login' to refresh, then retry")
-                        print(f"{self.log_prefix}     • Clear stale keys: hermes config set ANTHROPIC_TOKEN \"\"")
-                        print(f"{self.log_prefix}     • Legacy cleanup: hermes config set ANTHROPIC_API_KEY \"\"")
+                        print(f"{self.log_prefix}     • Legacy cleanup: hermes config set ANTHROPIC_TOKEN \"\"")
+                        print(f"{self.log_prefix}     • Clear stale keys: hermes config set ANTHROPIC_API_KEY \"\"")
+
+                    # ── Thinking block signature recovery ─────────────────
+                    # Anthropic signs thinking blocks against the full turn
+                    # content.  Any upstream mutation (context compression,
+                    # session truncation, message merging) invalidates the
+                    # signature → HTTP 400.  Recovery: strip reasoning_details
+                    # from all messages so the next retry sends no thinking
+                    # blocks at all.  One-shot — don't retry infinitely.
+                    if (
+                        self.api_mode == "anthropic_messages"
+                        and status_code == 400
+                        and not thinking_sig_retry_attempted
+                    ):
+                        _err_msg_lower = str(api_error).lower()
+                        if "signature" in _err_msg_lower and "thinking" in _err_msg_lower:
+                            thinking_sig_retry_attempted = True
+                            for _m in messages:
+                                if isinstance(_m, dict):
+                                    _m.pop("reasoning_details", None)
+                            self._vprint(
+                                f"{self.log_prefix}⚠️  Thinking block signature invalid — "
+                                f"stripped all thinking blocks, retrying...",
+                                force=True,
+                            )
+                            logging.warning(
+                                "%sThinking block signature recovery: stripped "
+                                "reasoning_details from %d messages",
+                                self.log_prefix, len(messages),
+                            )
+                            continue
 
                     retry_count += 1
                     elapsed_time = time.time() - api_start_time
@@ -8322,7 +8392,7 @@ class AIAgent:
                                     _retry_after = min(int(_ra_raw), 120)  # Cap at 2 minutes
                                 except (TypeError, ValueError):
                                     pass
-                    wait_time = _retry_after if _retry_after else min(2 ** retry_count, 60)
+                    wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
                     if is_rate_limited:
                         self._emit_status(f"⏱️ Rate limit reached. Waiting {wait_time}s before retry (attempt {retry_count + 1}/{max_retries})...")
                     else:

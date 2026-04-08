@@ -59,13 +59,48 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 logger = logging.getLogger(__name__)
 
+_PROVIDER_ALIASES = {
+    "google": "gemini",
+    "google-gemini": "gemini",
+    "google-ai-studio": "gemini",
+    "glm": "zai",
+    "z-ai": "zai",
+    "z.ai": "zai",
+    "zhipu": "zai",
+    "kimi": "kimi-coding",
+    "moonshot": "kimi-coding",
+    "minimax-china": "minimax-cn",
+    "minimax_cn": "minimax-cn",
+    "claude": "anthropic",
+    "claude-code": "anthropic",
+}
+
+
+def _normalize_aux_provider(provider: Optional[str], *, for_vision: bool = False) -> str:
+    normalized = (provider or "auto").strip().lower()
+    if normalized.startswith("custom:"):
+        suffix = normalized.split(":", 1)[1].strip()
+        if not suffix:
+            return "custom"
+        normalized = suffix if not for_vision else "custom"
+    if normalized == "codex":
+        return "openai-codex"
+    if normalized == "main":
+        # Resolve to the user's actual main provider so named custom providers
+        # and non-aggregator providers (DeepSeek, Alibaba, etc.) work correctly.
+        main_prov = _read_main_provider()
+        if main_prov and main_prov not in ("auto", "main", ""):
+            return main_prov
+        return "custom"
+    return _PROVIDER_ALIASES.get(normalized, normalized)
+
 # Default auxiliary models for direct API-key providers (cheap/fast for side tasks)
 _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "gemini": "gemini-3-flash-preview",
     "zai": "glm-4.5-flash",
     "kimi-coding": "kimi-k2-turbo-preview",
-    "minimax": "MiniMax-M2.7-highspeed",
-    "minimax-cn": "MiniMax-M2.7-highspeed",
+    "minimax": "MiniMax-M2.7",
+    "minimax-cn": "MiniMax-M2.7",
     "anthropic": "claude-haiku-4-5-20251001",
     "ai-gateway": "google/gemini-3-flash",
     "opencode-zen": "gemini-3-flash",
@@ -92,6 +127,7 @@ auxiliary_is_nous: bool = False
 _OPENROUTER_MODEL = "google/gemini-3-flash-preview"
 _NOUS_MODEL = "google/gemini-3-flash-preview"
 _NOUS_FREE_TIER_VISION_MODEL = "xiaomi/mimo-v2-omni"
+_NOUS_FREE_TIER_AUX_MODEL = "xiaomi/mimo-v2-pro"
 _NOUS_DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1"
 _ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 _AUTH_JSON_PATH = get_hermes_home() / "auth.json"
@@ -103,6 +139,23 @@ _AUTH_JSON_PATH = get_hermes_home() / "auth.json"
 # vision via Responses.
 _CODEX_AUX_MODEL = "gpt-5.2-codex"
 _CODEX_AUX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+
+def _to_openai_base_url(base_url: str) -> str:
+    """Normalize an Anthropic-style base URL to OpenAI-compatible format.
+
+    Some providers (MiniMax, MiniMax-CN) expose an ``/anthropic`` endpoint for
+    the Anthropic Messages API and a separate ``/v1`` endpoint for OpenAI chat
+    completions.  The auxiliary client uses the OpenAI SDK, so it must hit the
+    ``/v1`` surface.  Passing the raw ``inference_base_url`` causes requests to
+    land on ``/anthropic/chat/completions`` — a 404.
+    """
+    url = str(base_url or "").strip().rstrip("/")
+    if url.endswith("/anthropic"):
+        rewritten = url[: -len("/anthropic")] + "/v1"
+        logger.debug("Auxiliary client: rewrote base URL %s → %s", url, rewritten)
+        return rewritten
+    return url
 
 
 def _select_pool_entry(provider: str) -> Tuple[bool, Optional[Any]]:
@@ -634,7 +687,9 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
             if not api_key:
                 continue
 
-            base_url = _pool_runtime_base_url(entry, pconfig.inference_base_url) or pconfig.inference_base_url
+            base_url = _to_openai_base_url(
+                _pool_runtime_base_url(entry, pconfig.inference_base_url) or pconfig.inference_base_url
+            )
             model = _API_KEY_PROVIDER_AUX_MODELS.get(provider_id, "default")
             logger.debug("Auxiliary text client: %s (%s) via pool", pconfig.name, model)
             extra = {}
@@ -651,7 +706,9 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
         if not api_key:
             continue
 
-        base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
+        base_url = _to_openai_base_url(
+            str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
+        )
         model = _API_KEY_PROVIDER_AUX_MODELS.get(provider_id, "default")
         logger.debug("Auxiliary text client: %s (%s)", pconfig.name, model)
         extra = {}
@@ -713,7 +770,7 @@ def _try_openrouter() -> Tuple[Optional[OpenAI], Optional[str]]:
                    default_headers=_OR_HEADERS), _OPENROUTER_MODEL
 
 
-def _try_nous() -> Tuple[Optional[OpenAI], Optional[str]]:
+def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
     nous = _read_nous_auth()
     if not nous:
         return None, None
@@ -725,12 +782,13 @@ def _try_nous() -> Tuple[Optional[OpenAI], Optional[str]]:
     else:
         model = _NOUS_MODEL
     # Free-tier users can't use paid auxiliary models — use the free
-    # multimodal model instead so vision/browser-vision still works.
+    # models instead: mimo-v2-omni for vision, mimo-v2-pro for text tasks.
     try:
         from hermes_cli.models import check_nous_free_tier
         if check_nous_free_tier():
-            model = _NOUS_FREE_TIER_VISION_MODEL
-            logger.debug("Free-tier Nous account — using %s for auxiliary/vision", model)
+            model = _NOUS_FREE_TIER_VISION_MODEL if vision else _NOUS_FREE_TIER_AUX_MODEL
+            logger.debug("Free-tier Nous account — using %s for auxiliary/%s",
+                         model, "vision" if vision else "text")
     except Exception:
         pass
     return (
@@ -776,7 +834,7 @@ def _read_main_provider() -> str:
         if isinstance(model_cfg, dict):
             provider = model_cfg.get("provider", "")
             if isinstance(provider, str) and provider.strip():
-                return provider.strip().lower()
+                return _normalize_aux_provider(provider)
     except Exception:
         pass
     return ""
@@ -1138,17 +1196,7 @@ def resolve_provider_client(
         (client, resolved_model) or (None, None) if auth is unavailable.
     """
     # Normalise aliases
-    provider = (provider or "auto").strip().lower()
-    if provider == "codex":
-        provider = "openai-codex"
-    if provider == "main":
-        # Resolve to the user's actual main provider so named custom providers
-        # and non-aggregator providers (DeepSeek, Alibaba, etc.) work correctly.
-        main_prov = _read_main_provider()
-        if main_prov and main_prov not in ("auto", "main", ""):
-            provider = main_prov
-        else:
-            provider = "custom"
+    provider = _normalize_aux_provider(provider)
 
     # ── Auto: try all providers in priority order ────────────────────
     if provider == "auto":
@@ -1298,7 +1346,9 @@ def resolve_provider_client(
                          provider, ", ".join(tried_sources))
             return None, None
 
-        base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
+        base_url = _to_openai_base_url(
+            str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
+        )
 
         default_model = _API_KEY_PROVIDER_AUX_MODELS.get(provider, "")
         final_model = model or default_model
@@ -1375,24 +1425,11 @@ def get_async_text_auxiliary_client(task: str = ""):
 _VISION_AUTO_PROVIDER_ORDER = (
     "openrouter",
     "nous",
-    "openai-codex",
-    "anthropic",
-    "custom",
 )
 
 
 def _normalize_vision_provider(provider: Optional[str]) -> str:
-    provider = (provider or "auto").strip().lower()
-    if provider == "codex":
-        return "openai-codex"
-    if provider == "main":
-        # Resolve to actual main provider — named custom providers and
-        # non-aggregator providers need to pass through as their real name.
-        main_prov = _read_main_provider()
-        if main_prov and main_prov not in ("auto", "main", ""):
-            return main_prov
-        return "custom"
-    return provider
+    return _normalize_aux_provider(provider, for_vision=True)
 
 
 def _resolve_strict_vision_backend(provider: str) -> Tuple[Optional[Any], Optional[str]]:
@@ -1400,7 +1437,7 @@ def _resolve_strict_vision_backend(provider: str) -> Tuple[Optional[Any], Option
     if provider == "openrouter":
         return _try_openrouter()
     if provider == "nous":
-        return _try_nous()
+        return _try_nous(vision=True)
     if provider == "openai-codex":
         return _try_codex()
     if provider == "anthropic":
@@ -1433,17 +1470,20 @@ def _preferred_main_vision_provider() -> Optional[str]:
 def get_available_vision_backends() -> List[str]:
     """Return the currently available vision backends in auto-selection order.
 
-    This is the single source of truth for setup, tool gating, and runtime
-    auto-routing of vision tasks. The selected main provider is preferred when
-    it is also a known-good vision backend; otherwise Hermes falls back through
-    the standard conservative order.
+    Order: OpenRouter → Nous → active provider.  This is the single source
+    of truth for setup, tool gating, and runtime auto-routing of vision tasks.
     """
-    ordered = list(_VISION_AUTO_PROVIDER_ORDER)
-    preferred = _preferred_main_vision_provider()
-    if preferred in ordered:
-        ordered.remove(preferred)
-        ordered.insert(0, preferred)
-    return [provider for provider in ordered if _strict_vision_backend_available(provider)]
+    available = [p for p in _VISION_AUTO_PROVIDER_ORDER
+                 if _strict_vision_backend_available(p)]
+    # Also check the user's active provider (may be DeepSeek, Alibaba, named
+    # custom, etc.) — resolve_provider_client handles all provider types.
+    main_provider = _read_main_provider()
+    if (main_provider and main_provider not in ("auto", "")
+            and main_provider not in available):
+        client, _ = resolve_provider_client(main_provider, _read_main_model())
+        if client is not None:
+            available.append(main_provider)
+    return available
 
 
 def resolve_vision_provider_client(
@@ -1488,16 +1528,30 @@ def resolve_vision_provider_client(
         return "custom", client, final_model
 
     if requested == "auto":
-        ordered = list(_VISION_AUTO_PROVIDER_ORDER)
-        preferred = _preferred_main_vision_provider()
-        if preferred in ordered:
-            ordered.remove(preferred)
-            ordered.insert(0, preferred)
-
-        for candidate in ordered:
+        # Vision auto-detection order:
+        #   1. OpenRouter  (known vision-capable default model)
+        #   2. Nous Portal (known vision-capable default model)
+        #   3. Active provider + model (user's main chat config)
+        #   4. Stop
+        for candidate in _VISION_AUTO_PROVIDER_ORDER:
             sync_client, default_model = _resolve_strict_vision_backend(candidate)
             if sync_client is not None:
                 return _finalize(candidate, sync_client, default_model)
+
+        # Fall back to the user's active provider + model.
+        main_provider = _read_main_provider()
+        main_model = _read_main_model()
+        if main_provider and main_provider not in ("auto", ""):
+            sync_client, resolved_model = resolve_provider_client(
+                main_provider, main_model)
+            if sync_client is not None:
+                logger.info(
+                    "Vision auto-detect: using active provider %s (%s)",
+                    main_provider, resolved_model or main_model,
+                )
+                return _finalize(
+                    main_provider, sync_client, resolved_model or main_model)
+
         logger.debug("Auxiliary vision client: none available")
         return None, None, None
 
