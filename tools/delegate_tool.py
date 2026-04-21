@@ -23,7 +23,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from toolsets import TOOLSETS
 from utils import base_url_hostname
@@ -156,7 +156,7 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     return [t for t in toolsets if t not in blocked_toolset_names]
 
 
-def _build_child_progress_callback(task_index: int, goal: str, parent_agent, task_count: int = 1) -> Optional[callable]:
+def _build_child_progress_callback(task_index: int, goal: str, parent_agent, task_count: int = 1) -> Optional[Callable[..., Any]]:
     """Build a callback that relays child agent tool calls to the parent display.
 
     Two display paths:

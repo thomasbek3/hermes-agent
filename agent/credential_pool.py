@@ -876,6 +876,20 @@ class CredentialPool:
             self._current_id = None
         return removed
 
+    def remove_entry(self, entry_id: str) -> Optional[PooledCredential]:
+        for idx, entry in enumerate(self._entries):
+            if entry.id == entry_id:
+                removed = self._entries.pop(idx)
+                self._entries = [
+                    replace(e, priority=new_priority)
+                    for new_priority, e in enumerate(self._entries)
+                ]
+                self._persist()
+                if self._current_id == removed.id:
+                    self._current_id = None
+                return removed
+        return None
+
     def resolve_target(self, target: Any) -> Tuple[Optional[int], Optional[PooledCredential], Optional[str]]:
         raw = str(target or "").strip()
         if not raw:

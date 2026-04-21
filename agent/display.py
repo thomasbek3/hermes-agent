@@ -729,6 +729,8 @@ class KawaiiSpinner:
                 time.sleep(0.1)
                 continue
             frame = self.spinner_frames[self.frame_idx % len(self.spinner_frames)]
+            if self.start_time is None:
+                continue
             elapsed = time.time() - self.start_time
             if wings:
                 left, right = wings[self.frame_idx % len(wings)]

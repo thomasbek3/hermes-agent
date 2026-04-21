@@ -2644,6 +2644,12 @@ def _setup_wecom():
     _setup_standard_platform(wecom_platform)
 
 
+def _setup_wecom_callback():
+    """Configure WeCom Callback (self-built app) via the standard platform setup."""
+    wecom_platform = next(p for p in _PLATFORMS if p["key"] == "wecom_callback")
+    _setup_standard_platform(wecom_platform)
+
+
 def _is_service_installed() -> bool:
     """Check if the gateway is installed as a system service."""
     if supports_systemd_services():

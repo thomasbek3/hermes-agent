@@ -11,6 +11,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
@@ -27,7 +28,7 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
-_methods: dict[str, callable] = {}
+_methods: dict[str, Callable[..., Any]] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _answers: dict[str, str] = {}
 _db = None
@@ -3037,7 +3038,7 @@ def _(rid, params: dict) -> dict:
             from hermes_cli.banner import get_available_skills
             return _ok(rid, {"skills": get_available_skills()})
         if action == "search":
-            from hermes_cli.skills_hub import unified_search, GitHubAuth, create_source_router
+            from tools.skills_hub import unified_search, GitHubAuth, create_source_router
             raw = unified_search(query, create_source_router(GitHubAuth()), source_filter="all", limit=20) or []
             return _ok(rid, {"results": [{"name": r.name, "description": r.description} for r in raw]})
         if action == "install":

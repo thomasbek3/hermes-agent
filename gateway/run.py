@@ -10331,6 +10331,7 @@ class GatewayRunner:
                 if _timed_out_agent and hasattr(_timed_out_agent, "interrupt"):
                     _timed_out_agent.interrupt(_INTERRUPT_REASON_TIMEOUT)
 
+                assert _agent_timeout is not None  # narrowed by _idle_secs >= _agent_timeout above
                 _timeout_mins = int(_agent_timeout // 60) or 1
 
                 # Construct a user-facing message with diagnostic context.

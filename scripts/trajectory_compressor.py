@@ -611,11 +611,14 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                 
                 if getattr(self, '_use_call_llm', False):
                     from agent.auxiliary_client import call_llm
+                    _call_llm_kwargs: dict = {}
+                    if summary_temperature is not None:
+                        _call_llm_kwargs["temperature"] = summary_temperature
                     response = call_llm(
                         provider=self._llm_provider,
                         model=self.config.summarization_model,
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=summary_temperature,
+                        **_call_llm_kwargs,
                         max_tokens=self.config.summary_target_tokens * 2,
                     )
                 else:
@@ -627,14 +630,14 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     if summary_temperature is not None:
                         _create_kwargs["temperature"] = summary_temperature
                     response = self.client.chat.completions.create(**_create_kwargs)
-                
+
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
-                
+
             except Exception as e:
                 metrics.summarization_errors += 1
                 self.logger.warning(f"Summarization attempt {attempt + 1} failed: {e}")
-                
+
                 if attempt < self.config.max_retries - 1:
                     time.sleep(jittered_backoff(attempt + 1, base_delay=self.config.retry_delay, max_delay=30.0))
                 else:
@@ -681,11 +684,14 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                 
                 if getattr(self, '_use_call_llm', False):
                     from agent.auxiliary_client import async_call_llm
+                    _async_llm_kwargs: dict = {}
+                    if summary_temperature is not None:
+                        _async_llm_kwargs["temperature"] = summary_temperature
                     response = await async_call_llm(
                         provider=self._llm_provider,
                         model=self.config.summarization_model,
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=summary_temperature,
+                        **_async_llm_kwargs,
                         max_tokens=self.config.summary_target_tokens * 2,
                     )
                 else:
@@ -697,14 +703,14 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     if summary_temperature is not None:
                         _create_kwargs["temperature"] = summary_temperature
                     response = await self._get_async_client().chat.completions.create(**_create_kwargs)
-                
+
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
-                
+
             except Exception as e:
                 metrics.summarization_errors += 1
                 self.logger.warning(f"Summarization attempt {attempt + 1} failed: {e}")
-                
+
                 if attempt < self.config.max_retries - 1:
                     await asyncio.sleep(jittered_backoff(attempt + 1, base_delay=self.config.retry_delay, max_delay=30.0))
                 else:

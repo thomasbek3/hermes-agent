@@ -373,6 +373,10 @@ class _TerminalConfig(TypedDict):
     persistent_shell: bool
 
 
+class _CamofoxConfig(TypedDict, total=False):
+    managed_persistence: bool
+
+
 class _BrowserConfig(TypedDict):
     inactivity_timeout: int
     command_timeout: int
