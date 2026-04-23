@@ -94,6 +94,71 @@ class TestBlueBubblesHelpers:
         adapter = _make_adapter(monkeypatch, server_url="localhost:1234")
         assert adapter.server_url == "http://localhost:1234"
 
+    def test_connect_disables_aiohttp_access_log_to_avoid_password_leak(self, monkeypatch):
+        import asyncio
+        import types
+
+        captured = {}
+
+        class FakeResponse:
+            def __init__(self, text=None):
+                self.text = text
+
+        class FakeApplication:
+            def __init__(self):
+                self.router = types.SimpleNamespace(
+                    add_get=lambda *args, **kwargs: None,
+                    add_post=lambda *args, **kwargs: None,
+                )
+
+        class FakeRunner:
+            def __init__(self, app, **kwargs):
+                captured["runner_kwargs"] = kwargs
+
+            async def setup(self):
+                return None
+
+        class FakeSite:
+            def __init__(self, runner, host, port):
+                return None
+
+            async def start(self):
+                return None
+
+        fake_web = types.SimpleNamespace(
+            Application=FakeApplication,
+            AppRunner=FakeRunner,
+            TCPSite=FakeSite,
+            Response=FakeResponse,
+        )
+        monkeypatch.setitem(__import__("sys").modules, "aiohttp", types.SimpleNamespace(web=fake_web))
+
+        adapter = _make_adapter(monkeypatch)
+
+        async def fake_api_get(path):
+            return {"data": {"private_api": True, "helper_connected": True}}
+
+        adapter._api_get = fake_api_get
+
+        async def fake_register_webhook():
+            return True
+
+        adapter._register_webhook = fake_register_webhook
+        assert asyncio.get_event_loop().run_until_complete(adapter.connect()) is True
+        assert "access_log" in captured["runner_kwargs"]
+        assert captured["runner_kwargs"]["access_log"] is None
+
+    def test_redact_removes_webhook_auth_query_from_logs(self, monkeypatch):
+        monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
+        monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
+        from gateway.platforms.bluebubbles import _redact
+
+        url = "http://localhost:8645/bluebubbles-webhook?password=super-secret&x=1"
+        redacted = _redact(url)
+        assert "super-secret" not in redacted
+        assert "password=[REDACTED]" in redacted
+        assert "x=1" in redacted
+
 
 class TestBlueBubblesWebhookParsing:
     def test_webhook_prefers_chat_guid_over_message_guid(self, monkeypatch):

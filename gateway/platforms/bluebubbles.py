@@ -62,7 +62,8 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
 
 
 def _redact(text: str) -> str:
-    """Redact phone numbers and emails from log output."""
+    """Redact phone numbers, emails, and BlueBubbles auth tokens from logs."""
+    text = re.sub(r"([?&](?:password|token|secret|key)=)[^&\s]+", r"\1[REDACTED]", text, flags=re.I)
     text = _PHONE_RE.sub("[REDACTED]", text)
     text = _EMAIL_RE.sub("[REDACTED]", text)
     return text
@@ -186,7 +187,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         app = web.Application()
         app.router.add_get("/health", lambda _: web.Response(text="ok"))
         app.router.add_post(self.webhook_path, self._handle_webhook)
-        self._runner = web.AppRunner(app)
+        # Disable aiohttp access logs here because BlueBubbles webhook auth is
+        # carried in the query string (BlueBubbles does not support custom
+        # webhook headers). Otherwise every inbound webhook leaks the server
+        # password into Hermes logs.
+        self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.webhook_host, self.webhook_port)
         await site.start()
@@ -266,7 +271,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         existing = await self._find_registered_webhooks(webhook_url)
         if existing:
             logger.info(
-                "[bluebubbles] webhook already registered: %s", webhook_url
+                "[bluebubbles] webhook already registered: %s", _redact(webhook_url)
             )
             return True
 
@@ -281,7 +286,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             if 200 <= status < 300:
                 logger.info(
                     "[bluebubbles] webhook registered with server: %s",
-                    webhook_url,
+                    _redact(webhook_url),
                 )
                 return True
             else:
@@ -321,7 +326,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                     removed = True
             if removed:
                 logger.info(
-                    "[bluebubbles] webhook unregistered: %s", webhook_url
+                    "[bluebubbles] webhook unregistered: %s", _redact(webhook_url)
                 )
         except Exception as exc:
             logger.debug(
