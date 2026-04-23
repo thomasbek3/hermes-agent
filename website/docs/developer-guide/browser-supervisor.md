@@ -86,15 +86,15 @@ Policy is per-task; no per-dialog overrides in v1.
 ### One new tool
 
 ```
-browser_dialog(action=None, prompt_text=None, dialog_id=None)
+browser_dialog(action, prompt_text=None, dialog_id=None)
 ```
 
-- `action=None` (omit) → returns pending dialogs; acts as inspection
-- `action="accept"` / `"dismiss"` → responds to the specified or sole pending dialog
+- `action="accept"` / `"dismiss"` → responds to the specified or sole pending dialog (required)
 - `prompt_text=...` → text to supply to a `prompt()` dialog
 - `dialog_id=...` → disambiguate when multiple dialogs queued (rare)
 
-Only one tool. Frame tree and detailed state go into `browser_snapshot` output.
+Tool is response-only. Agent reads pending dialogs from `browser_snapshot`
+output before calling.
 
 ### `browser_snapshot` extension
 
@@ -111,10 +111,16 @@ attached:
     "children": [
       {"frame_id": "FRAME_B", "url": "about:srcdoc", "is_oopif": false},
       {"frame_id": "FRAME_C", "url": "https://ads.example.net/", "is_oopif": true, "session_id": "SID_C"}
-    ]
+    ],
+    "truncated": false
   }
 }
 ```
+
+Frame tree is capped to avoid blowing up the snapshot on ad-heavy pages:
+first 30 frames returned, OOPIF children past depth 2 omitted. `truncated`
+flag surfaces when limits hit; agent can consult `browser_cdp` escape hatch
+for full tree if needed.
 
 No new tool schema surface for frames — the agent reads the snapshot it
 already requests.
