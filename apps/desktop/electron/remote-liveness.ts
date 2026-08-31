@@ -3,8 +3,11 @@ export const REMOTE_LIVENESS_TIMEOUT_MS = 10_000
 // forwarded endpoint is alive before it can be returned. Keep this probe much
 // shorter than the background liveness budget so a dead tunnel reconnects
 // promptly instead of making the click feel hung.
-export const POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS = 2_500
-export const REMOTE_LIVENESS_FAILURE_LIMIT = 3
+// Carried patch: 2.5s was a hair-trigger against a busy remote host — any
+// 3-second stall (GC, big store query, load spike) cascaded into a full UI
+// reconnect. Tolerate brief stalls; genuine outages still trip the limit.
+export const POOLED_REMOTE_DISPATCH_PROBE_TIMEOUT_MS = 8_000
+export const REMOTE_LIVENESS_FAILURE_LIMIT = 5
 // Even at the capped retry path, consecutive liveness observations are at most
 // about 48s apart (ticket mint + socket open + backoff + the next status probe).
 // One minute keeps a continuous outage together without carrying old failures.
