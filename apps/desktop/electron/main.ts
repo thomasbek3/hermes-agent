@@ -11325,7 +11325,13 @@ async function ensureRegistryBackend(connectionId, profile, managedUpdateCorrela
 
           if (source.kind === 'ssh') {
             await sshBootstrapCoordinator.cancelAndWait(key)
-            await teardownSshConnection(key)
+            // Carried patch: do NOT tear down the SSH transport here. One
+            // profile's dispatch-probe hiccup used to close the shared
+            // control master and reload every open tab (the "loading screen"
+            // storms). Stopping the pool entry is enough — the next dial for
+            // this key re-establishes whatever transport it needs, and true
+            // transport-wide death is still handled by the cached-connection
+            // liveness path with its own multi-strike teardown.
           }
         }
       })
