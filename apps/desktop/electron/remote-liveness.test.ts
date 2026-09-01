@@ -191,18 +191,23 @@ describe('revalidateRemoteConnection', () => {
     expect(test.resetConnection).not.toHaveBeenCalled()
   })
 
-  it('keeps failures one and two, then resets on the third failure', async () => {
+  it('keeps failures below the limit, then resets when the limit is reached', async () => {
+    // Tracks REMOTE_LIVENESS_FAILURE_LIMIT (carried patch raised 3 -> 5 for
+    // busy-host tolerance) instead of hardcoding the strike count.
     const probe = vi.fn().mockRejectedValue(new Error('offline'))
     const test = harness({ probe })
 
-    await expect(revalidateRemoteConnection(test.options)).resolves.toEqual({ ok: true, rebuilt: false })
-    await expect(revalidateRemoteConnection(test.options)).resolves.toEqual({ ok: true, rebuilt: false })
+    for (let i = 1; i < REMOTE_LIVENESS_FAILURE_LIMIT; i++) {
+      await expect(revalidateRemoteConnection(test.options)).resolves.toEqual({ ok: true, rebuilt: false })
+      expect(test.log).toHaveBeenNthCalledWith(
+        i,
+        expect.stringContaining(`(${i}/${REMOTE_LIVENESS_FAILURE_LIMIT})`)
+      )
+    }
     await expect(revalidateRemoteConnection(test.options)).resolves.toEqual({ ok: true, rebuilt: true })
 
-    expect(probe).toHaveBeenCalledTimes(3)
+    expect(probe).toHaveBeenCalledTimes(REMOTE_LIVENESS_FAILURE_LIMIT)
     expect(test.resetConnection).toHaveBeenCalledOnce()
-    expect(test.log).toHaveBeenNthCalledWith(1, expect.stringContaining('(1/3)'))
-    expect(test.log).toHaveBeenNthCalledWith(2, expect.stringContaining('(2/3)'))
     expect(test.log).toHaveBeenLastCalledWith(expect.stringContaining('dropping stale connection'))
   })
 
