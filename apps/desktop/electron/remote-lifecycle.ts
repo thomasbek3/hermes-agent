@@ -1173,7 +1173,11 @@ async function scrapeReadyPort(ssh, logPath, { timeoutMs = DEFAULT_READY_TIMEOUT
 // loops (observed 4-hourly at the remote's maintenance windows and on every
 // wake). Bounding concurrency at this leaf covers every caller path with no
 // re-entrancy risk; queued spawns simply wait their turn.
-const REMOTE_SPAWN_MAX = 3
+// 3 was still too hot: each spawned backend's own init (secret resolution,
+// MCP children) stacks load AFTER the spawn returns — 24 profiles at 3
+// concurrent compressed ~40s of heavy init and spiked the host to load 50.
+// Serial spawning stretches the same warmup over ~2 quiet minutes.
+const REMOTE_SPAWN_MAX = 1
 let remoteSpawnActive = 0
 const remoteSpawnWaiters: Array<() => void> = []
 async function remoteSpawnGate<T>(fn: () => Promise<T>): Promise<T> {
