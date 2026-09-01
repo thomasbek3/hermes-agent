@@ -1166,7 +1166,40 @@ async function scrapeReadyPort(ssh, logPath, { timeoutMs = DEFAULT_READY_TIMEOUT
   throw err
 }
 
+// Global spawn gate (carried patch): every remote isolated serve funnels
+// through spawnRemoteDashboard, and mass-reconnect events (app boot, system
+// wake, periodic revalidation, roster media warmup) previously dialed all
+// ~25 profiles at once — staggering the remote host into liveness-teardown
+// loops (observed 4-hourly at the remote's maintenance windows and on every
+// wake). Bounding concurrency at this leaf covers every caller path with no
+// re-entrancy risk; queued spawns simply wait their turn.
+const REMOTE_SPAWN_MAX = 3
+let remoteSpawnActive = 0
+const remoteSpawnWaiters: Array<() => void> = []
+async function remoteSpawnGate<T>(fn: () => Promise<T>): Promise<T> {
+  if (remoteSpawnActive >= REMOTE_SPAWN_MAX) {
+    await new Promise<void>(resolve => remoteSpawnWaiters.push(resolve))
+  }
+  remoteSpawnActive += 1
+  try {
+    return await fn()
+  } finally {
+    remoteSpawnActive -= 1
+    const next = remoteSpawnWaiters.shift()
+    if (next) {
+      next()
+    }
+  }
+}
+
 async function spawnRemoteDashboard(
+  ssh,
+  options: any
+) {
+  return remoteSpawnGate(() => spawnRemoteDashboardInner(ssh, options))
+}
+
+async function spawnRemoteDashboardInner(
   ssh,
   { hermesPath, profile, token, ownershipId, hermesHome = '~/.hermes', assertInstallClear = async () => {} }
 ) {
