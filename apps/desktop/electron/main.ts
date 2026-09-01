@@ -1371,18 +1371,26 @@ function registerMediaProtocol() {
     // Claim-guarded (#90812): a media stream load can race a renderer's own
     // reconnect dial for the same (connectionId, profile) scope; coalescing
     // here avoids bootstrapping a second SSH tunnel / remote dashboard.
-    resolveRemoteConnection: ({ connectionId, profile }) =>
-      // Carried patch: media loads (bot avatars) previously dialed a backend
-      // per profile with unbounded cross-profile concurrency — rendering a
-      // 24-bot roster stampeded ~25 simultaneous remote spawns, spiking the
-      // remote host and tripping the desktop's own liveness teardown.
-      // Per-profile dials stay claim-coalesced; this gate only bounds how
-      // many DISTINCT profiles dial at once.
-      mediaDialGate(() =>
+    resolveRemoteConnection: ({ connectionId, profile }) => {
+      // Carried patch v2: media loads (bot avatars) must NEVER cause a
+      // backend to spawn — a 24-bot roster render used to dial ~25 remote
+      // backends (and keep them alive), permanently loading the remote host
+      // to the desktop's own liveness-teardown edge. Media now only rides
+      // backends that already exist for real reasons (an open chat); with
+      // none, the handler 404s and the renderer shows its fallback avatar.
+      const peekKeys = connectionId
+        ? [`conn:${connectionId}::${profile}`]
+        : poolTouchKeys(profile)
+      const alive = peekKeys.some(key => backendPool.get(key))
+      if (!alive) {
+        return Promise.reject(new Error('media: no live backend for profile; not dialing'))
+      }
+      return mediaDialGate(() =>
         backendDialClaims.run(backendScopeKey(connectionId, profile), () =>
           connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)
         )
       )
+    }
   })
 
   protocol.handle(MEDIA_PROTOCOL, handler)
