@@ -1369,12 +1369,42 @@ function registerMediaProtocol() {
     // reconnect dial for the same (connectionId, profile) scope; coalescing
     // here avoids bootstrapping a second SSH tunnel / remote dashboard.
     resolveRemoteConnection: ({ connectionId, profile }) =>
-      backendDialClaims.run(backendScopeKey(connectionId, profile), () =>
-        connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)
+      // Carried patch: media loads (bot avatars) previously dialed a backend
+      // per profile with unbounded cross-profile concurrency — rendering a
+      // 24-bot roster stampeded ~25 simultaneous remote spawns, spiking the
+      // remote host and tripping the desktop's own liveness teardown.
+      // Per-profile dials stay claim-coalesced; this gate only bounds how
+      // many DISTINCT profiles dial at once.
+      mediaDialGate(() =>
+        backendDialClaims.run(backendScopeKey(connectionId, profile), () =>
+          connectionId ? ensureRegistryBackend(connectionId, profile) : ensureBackend(profile)
+        )
       )
   })
 
   protocol.handle(MEDIA_PROTOCOL, handler)
+}
+
+// Bounds concurrent remote-backend dials triggered by media loads (see the
+// carried-patch note in resolveRemoteConnection). Three at a time keeps a
+// large roster warming steadily without staggering the remote host.
+const MEDIA_DIAL_MAX = 3
+let mediaDialActive = 0
+const mediaDialWaiters: Array<() => void> = []
+async function mediaDialGate<T>(fn: () => Promise<T>): Promise<T> {
+  if (mediaDialActive >= MEDIA_DIAL_MAX) {
+    await new Promise<void>(resolve => mediaDialWaiters.push(resolve))
+  }
+  mediaDialActive += 1
+  try {
+    return await fn()
+  } finally {
+    mediaDialActive -= 1
+    const next = mediaDialWaiters.shift()
+    if (next) {
+      next()
+    }
+  }
 }
 
 let mainWindow = null
